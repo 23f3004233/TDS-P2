@@ -232,6 +232,7 @@ MIT License - See LICENSE file
 
 ## Authors
 
+Devodita Chakravarty,
 Student Project for IIT Madras Data Science Program
 
 ## Acknowledgments
