@@ -1,41 +1,39 @@
 """Configuration management for the quiz solver application."""
 import os
 from typing import List
-from pydantic_settings import BaseSettings
-from dotenv import load_dotenv
-load_dotenv()
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     """Application settings."""
     
     # API Configuration
-    aipipe_token: str = os.getenv("AIPIPE_TOKEN", "")
-    email: str = os.getenv("EMAIL", "")
-    quiz_secret: str = os.getenv("QUIZ_SECRET", "")
-    github_repo: str = os.getenv("GITHUB_REPO", "")
+    aipipe_token: str = ""
+    email: str = ""
+    quiz_secret: str = ""
+    github_repo: str = ""
     
     # Server Configuration
-    host: str = os.getenv("HOST", "0.0.0.0")
-    port: int = int(os.getenv("PORT", "8000"))
-    log_level: str = os.getenv("LOG_LEVEL", "INFO")
+    host: str = "0.0.0.0"
+    port: int = 8000
+    log_level: str = "INFO"
     
     # Timeout Configuration (seconds)
-    quiz_timeout: int = int(os.getenv("QUIZ_TIMEOUT", "180"))
-    request_timeout: int = int(os.getenv("REQUEST_TIMEOUT", "30"))
-    browser_timeout: int = int(os.getenv("BROWSER_TIMEOUT", "60"))
+    quiz_timeout: int = 180
+    request_timeout: int = 30
+    browser_timeout: int = 60
     
     # AI Model Configuration
-    primary_model: str = os.getenv("PRIMARY_MODEL", "openai/gpt-4o")
-    verifier_model: str = os.getenv("VERIFIER_MODEL", "anthropic/claude-sonnet-4")
-    fallback_models: List[str] = os.getenv(
-        "FALLBACK_MODELS", 
-        "google/gemini-2.0-flash-exp,openai/gpt-4-turbo"
-    ).split(",")
+    primary_model: str = "openai/gpt-4o"
+    verifier_model: str = "anthropic/claude-sonnet-4"
+    fallback_models: List[str] = Field(
+        default=["google/gemini-2.0-flash-exp", "openai/gpt-4-turbo"]
+    )
     
     # Processing Configuration
-    max_file_size_mb: int = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
-    max_retries: int = int(os.getenv("MAX_RETRIES", "3"))
-    enable_verification: bool = os.getenv("ENABLE_VERIFICATION", "true").lower() == "true"
+    max_file_size_mb: int = 50
+    max_retries: int = 3
+    enable_verification: bool = True
     
     # AIPipe Configuration
     aipipe_base_url: str = "https://aipipe.org/openrouter/v1"
@@ -44,9 +42,12 @@ class Settings(BaseSettings):
     # Working Directory
     work_dir: str = "/tmp/quiz_solver"
     
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore"
+    )
 
 
 # Global settings instance
