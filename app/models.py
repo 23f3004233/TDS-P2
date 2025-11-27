@@ -1,5 +1,6 @@
 """Pydantic models for request/response validation."""
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, List
+from datetime import datetime
 from pydantic import BaseModel, Field, EmailStr
 
 
@@ -23,12 +24,14 @@ class QuizResponse(BaseModel):
     """Response to quiz request."""
     status: str
     message: str
+    session_id: Optional[str] = None
     
     class Config:
         json_schema_extra = {
             "example": {
                 "status": "processing",
-                "message": "Quiz processing started"
+                "message": "Quiz processing started",
+                "session_id": "550e8400-e29b-41d4-a716-446655440000"
             }
         }
 
@@ -116,5 +119,47 @@ class VerificationResult(BaseModel):
                 "approved": True,
                 "feedback": None,
                 "confidence": 0.98
+            }
+        }
+
+
+# NEW MODELS FOR RESULT TRACKING
+
+class QuizAttempt(BaseModel):
+    """Single quiz attempt result."""
+    quiz_number: int
+    url: str
+    question: str
+    answer: Any
+    correct: bool
+    reason: Optional[str] = None
+    confidence: float
+    timestamp: datetime
+    next_url: Optional[str] = None
+
+
+class SessionResult(BaseModel):
+    """Complete session result."""
+    session_id: str
+    email: str
+    status: str  # "processing", "completed", "failed"
+    start_time: datetime
+    end_time: Optional[datetime] = None
+    total_quizzes: int = 0
+    correct_answers: int = 0
+    attempts: List[QuizAttempt] = Field(default_factory=list)
+    error: Optional[str] = None
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "session_id": "550e8400-e29b-41d4-a716-446655440000",
+                "email": "student@example.com",
+                "status": "completed",
+                "start_time": "2025-11-27T10:00:00",
+                "end_time": "2025-11-27T10:02:30",
+                "total_quizzes": 3,
+                "correct_answers": 2,
+                "attempts": []
             }
         }

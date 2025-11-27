@@ -1,18 +1,22 @@
 """Orchestrator agent - coordinates the entire quiz-solving process."""
 import asyncio
 import httpx
+import uuid
 from typing import Optional, List, Dict, Any
+from datetime import datetime
 from app.models import (
     QuizRequest, 
     QuizTask, 
     AnswerSubmission, 
     AnswerResponse,
     AnalysisResult,
-    VerificationResult
+    VerificationResult,
+    QuizAttempt
 )
 from app.config import settings
 from app.utils.timer import QuizTimer
 from app.utils.logger import get_logger
+from app.storage import storage
 from agents.fetcher import FetcherAgent
 from agents.analyzer import AnalyzerAgent
 from agents.verifier import VerifierAgent
@@ -30,14 +34,16 @@ class OrchestratorAgent:
         self.max_retries = settings.max_retries
         self.enable_verification = settings.enable_verification
     
-    async def process_quiz(self, request: QuizRequest):
+    async def process_quiz(self, request: QuizRequest, session_id: str):
         """
         Process complete quiz chain.
         
         Args:
             request: Initial quiz request
+            session_id: Unique session identifier
         """
         logger.info(f"=== Starting quiz processing for {request.email} ===")
+        logger.info(f"Session ID: {session_id}")
         logger.info(f"Initial URL: {request.url}")
         
         # Start timer
@@ -47,59 +53,88 @@ class OrchestratorAgent:
         current_url = request.url
         quiz_number = 1
         
-        while current_url and timer.should_continue():
-            logger.info(f"\n{'='*60}")
-            logger.info(f"Quiz #{quiz_number}: {current_url}")
-            logger.info(f"{'='*60}\n")
-            
-            timer.log_status(f"Quiz #{quiz_number}")
-            
-            try:
-                # Fetch quiz
-                quiz_task = await self.fetcher.fetch_quiz_page(current_url)
+        try:
+            while current_url and timer.should_continue():
+                logger.info(f"\n{'='*60}")
+                logger.info(f"Quiz #{quiz_number}: {current_url}")
+                logger.info(f"{'='*60}\n")
                 
-                if not timer.should_continue():
-                    logger.warning("Timer expiring, submitting best attempt")
+                timer.log_status(f"Quiz #{quiz_number}")
                 
-                # Solve quiz with verification loop
-                answer = await self._solve_quiz_with_verification(
-                    quiz_task, 
-                    request, 
-                    timer
-                )
-                
-                # Submit answer
-                next_url = await self._submit_answer(
-                    quiz_task, 
-                    answer, 
-                    request,
-                    timer
-                )
-                
-                # Move to next quiz
-                if next_url:
-                    current_url = next_url
-                    quiz_number += 1
-                    logger.info(f"Moving to next quiz: {next_url}")
-                else:
-                    logger.info("Quiz chain complete!")
-                    break
+                try:
+                    # Fetch quiz
+                    quiz_task = await self.fetcher.fetch_quiz_page(current_url)
                     
-            except Exception as e:
-                logger.error(f"Error processing quiz #{quiz_number}: {e}")
-                break
-        
-        elapsed = timer.elapsed()
-        logger.info(f"\n=== Quiz processing complete ===")
-        logger.info(f"Total time: {elapsed:.2f}s")
-        logger.info(f"Quizzes completed: {quiz_number}")
+                    if not timer.should_continue():
+                        logger.warning("Timer expiring, submitting best attempt")
+                    
+                    # Solve quiz with verification loop
+                    analysis_result = await self._solve_quiz_with_verification(
+                        quiz_task, 
+                        request, 
+                        timer
+                    )
+                    
+                    # Submit answer and get result
+                    submission_result = await self._submit_answer(
+                        quiz_task, 
+                        analysis_result.answer, 
+                        request,
+                        timer
+                    )
+                    
+                    # Record attempt
+                    attempt = QuizAttempt(
+                        quiz_number=quiz_number,
+                        url=current_url,
+                        question=quiz_task.question[:200],  # Truncate long questions
+                        answer=analysis_result.answer,
+                        correct=submission_result.get("correct", False),
+                        reason=submission_result.get("reason"),
+                        confidence=analysis_result.confidence,
+                        timestamp=datetime.now(),
+                        next_url=submission_result.get("next_url")
+                    )
+                    storage.add_attempt(session_id, attempt)
+                    
+                    # Move to next quiz
+                    next_url = submission_result.get("next_url")
+                    if next_url:
+                        current_url = next_url
+                        quiz_number += 1
+                        logger.info(f"Moving to next quiz: {next_url}")
+                    else:
+                        logger.info("Quiz chain complete!")
+                        break
+                        
+                except Exception as e:
+                    logger.error(f"Error processing quiz #{quiz_number}: {e}")
+                    storage.complete_session(session_id, error=str(e))
+                    raise
+            
+            # Mark as complete
+            storage.complete_session(session_id)
+            
+            elapsed = timer.elapsed()
+            logger.info(f"\n=== Quiz processing complete ===")
+            logger.info(f"Session ID: {session_id}")
+            logger.info(f"Total time: {elapsed:.2f}s")
+            logger.info(f"Quizzes completed: {quiz_number}")
+            
+            session = storage.get_session(session_id)
+            logger.info(f"Correct answers: {session.correct_answers}/{session.total_quizzes}")
+            
+        except Exception as e:
+            logger.error(f"Fatal error in quiz processing: {e}")
+            storage.complete_session(session_id, error=str(e))
+            raise
     
     async def _solve_quiz_with_verification(
         self, 
         quiz_task: QuizTask, 
         request: QuizRequest,
         timer: QuizTimer
-    ) -> Any:
+    ) -> AnalysisResult:
         """
         Solve quiz with analyzer-verifier loop.
         
@@ -109,7 +144,7 @@ class OrchestratorAgent:
             timer: Quiz timer
             
         Returns:
-            Final answer
+            Analysis result with answer
         """
         logger.info("Starting solver loop")
         
@@ -162,7 +197,7 @@ class OrchestratorAgent:
                     logger.info("No feedback provided, using current answer")
                     break
         
-        return analysis_result.answer
+        return analysis_result
     
     async def _submit_answer(
         self, 
@@ -170,7 +205,7 @@ class OrchestratorAgent:
         answer: Any, 
         request: QuizRequest,
         timer: QuizTimer
-    ) -> Optional[str]:
+    ) -> Dict[str, Any]:
         """
         Submit answer to quiz system.
         
@@ -181,12 +216,12 @@ class OrchestratorAgent:
             timer: Quiz timer
             
         Returns:
-            Next quiz URL if any
+            Dictionary with 'correct', 'reason', and 'next_url' keys
         """
         submit_url = quiz_task.submit_url
         if not submit_url:
             logger.error("No submit URL found!")
-            return None
+            return {"correct": False, "reason": "No submit URL found", "next_url": None}
         
         logger.info(f"Submitting answer to: {submit_url}")
         logger.info(f"Answer: {answer}")
@@ -218,37 +253,44 @@ class OrchestratorAgent:
                         result = response.json()
                         logger.info(f"Response: {result}")
                         
-                        if result.get("correct"):
+                        correct = result.get("correct", False)
+                        reason = result.get("reason")
+                        next_url = result.get("url")
+                        
+                        if correct:
                             logger.info("✓ Answer correct!")
-                            return result.get("url")  # Next quiz URL
                         else:
-                            reason = result.get("reason", "No reason provided")
-                            logger.warning(f"✗ Answer incorrect: {reason}")
-                            
-                            # Check if we got a next URL anyway
-                            next_url = result.get("url")
-                            if next_url:
-                                logger.info("Received next URL despite incorrect answer")
-                                return next_url
-                            
-                            # Retry if we have time
-                            if retry < self.max_retries - 1:
-                                logger.info(f"Retrying ({retry + 1}/{self.max_retries})...")
-                                # Could potentially re-analyze here with the reason
-                                await asyncio.sleep(1)
-                                continue
-                            else:
-                                logger.warning("Max retries reached")
-                                return None
+                            logger.warning(f"✗ Answer incorrect: {reason or 'No reason provided'}")
+                        
+                        return {
+                            "correct": correct,
+                            "reason": reason,
+                            "next_url": next_url
+                        }
                     else:
                         logger.error(f"HTTP {response.status_code}: {response.text}")
-                        return None
+                        if retry < self.max_retries - 1:
+                            await asyncio.sleep(1)
+                            continue
+                        return {
+                            "correct": False,
+                            "reason": f"HTTP {response.status_code}",
+                            "next_url": None
+                        }
                         
             except Exception as e:
                 logger.error(f"Error submitting answer: {e}")
                 if retry < self.max_retries - 1:
                     await asyncio.sleep(1)
                     continue
-                return None
+                return {
+                    "correct": False,
+                    "reason": str(e),
+                    "next_url": None
+                }
         
-        return None
+        return {
+            "correct": False,
+            "reason": "Max retries exceeded",
+            "next_url": None
+        }

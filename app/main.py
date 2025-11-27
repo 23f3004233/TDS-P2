@@ -1,12 +1,15 @@
 """Main FastAPI application entry point."""
 import asyncio
+import uuid
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from typing import Optional
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
 from fastapi.responses import JSONResponse
-from app.models import QuizRequest, QuizResponse
+from app.models import QuizRequest, QuizResponse, SessionResult
 from app.config import settings
 from app.utils.auth import verify_secret, verify_email
 from app.utils.logger import get_logger
+from app.storage import storage
 from agents.orchestrator import OrchestratorAgent
 
 logger = get_logger(__name__)
@@ -63,7 +66,7 @@ async def handle_quiz(
     Main quiz handling endpoint.
     
     Accepts POST requests with quiz URL and credentials.
-    Processes quiz in background and returns immediately.
+    Processes quiz in background and returns immediately with session ID.
     """
     logger.info(f"\n{'='*60}")
     logger.info(f"Received quiz request from: {request.email}")
@@ -77,14 +80,21 @@ async def handle_quiz(
         # Verify secret
         verify_secret(request.secret, request.email)
         
-        # Add quiz processing to background tasks
-        background_tasks.add_task(orchestrator.process_quiz, request)
+        # Generate session ID
+        session_id = str(uuid.uuid4())
         
-        logger.info("Quiz processing started in background")
+        # Create session in storage
+        storage.create_session(session_id, request.email)
+        
+        # Add quiz processing to background tasks
+        background_tasks.add_task(orchestrator.process_quiz, request, session_id)
+        
+        logger.info(f"Quiz processing started in background - Session ID: {session_id}")
         
         return QuizResponse(
             status="processing",
-            message="Quiz processing started successfully"
+            message="Quiz processing started successfully",
+            session_id=session_id
         )
         
     except HTTPException as e:
@@ -93,6 +103,36 @@ async def handle_quiz(
     except Exception as e:
         logger.error(f"Error handling quiz request: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/results/{session_id}", response_model=SessionResult)
+async def get_session_results(session_id: str):
+    """
+    Get results for a specific session.
+    
+    Args:
+        session_id: Session identifier returned from /quiz endpoint
+    """
+    session = storage.get_session(session_id)
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    return session
+
+
+@app.get("/results", response_model=list[SessionResult])
+async def list_sessions(
+    email: Optional[str] = Query(None, description="Filter by email address")
+):
+    """
+    List all quiz sessions.
+    
+    Args:
+        email: Optional email filter
+    """
+    sessions = storage.list_sessions(email=email)
+    return sessions
 
 
 @app.exception_handler(400)
